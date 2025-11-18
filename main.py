@@ -42,36 +42,163 @@ def init_db():
 # Fetch and filter data function
 async def fetch_and_filter_data():
     """
-    Fetch data from API and filter it according to your criteria.
-    Modify this function with your actual API endpoint and filtering logic.
+    Fetch data from SmartLead API and perform joins to create final dataset.
+    
+    Workflow:
+    1. [Dataset 1] Call /email-accounts to get all email account data
+    2. [Dataset 2] Call /campaigns to get all campaigns
+    3. [Dataset 3] For each campaign, call /campaigns/{campaign_id}/email-accounts
+    4. [Dataset 4] Left outer join Dataset 1 and Dataset 3 on email account id
+    5. [Dataset 5] Left join Dataset 4 and Dataset 2 on campaign id
     """
-    logger.info("Starting data fetch and filter job...")
+    logger.info("Starting SmartLead data fetch job...")
     
     try:
-        # REPLACE THIS URL with your actual API endpoint
-        api_url = "https://api.example.com/data"
+        # IMPORTANT: Set your SmartLead API key here or use environment variable
+        # Get from: https://app.smartlead.ai/app/settings/profile
+        import os
+        api_key = os.getenv('SMARTLEAD_API_KEY', 'YOUR_API_KEY_HERE')
         
-        # Example: Fetch data from API
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Add any headers or authentication here
-            # headers = {"Authorization": "Bearer YOUR_TOKEN"}
-            response = await client.get(api_url)
+        if api_key == 'YOUR_API_KEY_HERE':
+            raise ValueError("Please set your SmartLead API key in the SMARTLEAD_API_KEY environment variable or update the code")
+        
+        base_url = "https://server.smartlead.ai/api/v1"
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # ========================================
+            # Dataset 1: Get all email accounts
+            # ========================================
+            logger.info("Fetching email accounts (Dataset 1)...")
+            dataset1 = []
+            offset = 0
+            limit = 100
+            
+            while True:
+                url = f"{base_url}/email-accounts/?api_key={api_key}&offset={offset}&limit={limit}"
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                
+                if not data or len(data) == 0:
+                    break
+                
+                for account in data:
+                    dataset1.append({
+                        'email_account_id': account.get('id'),
+                        'email_address': account.get('from_email'),
+                        'warmup_reputation': account.get('warmup_details', {}).get('warmup_reputation'),
+                        'warmup_start_date': account.get('warmup_details', {}).get('created_at')
+                    })
+                
+                if len(data) < limit:
+                    break
+                offset += limit
+            
+            logger.info(f"Fetched {len(dataset1)} email accounts")
+            
+            # ========================================
+            # Dataset 2: Get all campaigns
+            # ========================================
+            logger.info("Fetching campaigns (Dataset 2)...")
+            url = f"{base_url}/campaigns?api_key={api_key}"
+            response = await client.get(url)
             response.raise_for_status()
-            raw_data = response.json()
-        
-        # REPLACE THIS with your actual filtering logic
-        # Example filtering: keep only rows where 'status' == 'active'
-        filtered_data = []
-        
-        # Assuming raw_data is a list of dictionaries
-        if isinstance(raw_data, list):
-            for row in raw_data:
-                # Add your filtering criteria here
-                # Example: if row.get('status') == 'active':
-                filtered_data.append(row)
-        else:
-            # If API returns a different format, adjust accordingly
-            filtered_data = raw_data
+            campaigns = response.json()
+            
+            dataset2 = []
+            for campaign in campaigns:
+                dataset2.append({
+                    'campaign_id': campaign.get('id'),
+                    'campaign_name': campaign.get('name'),
+                    'campaign_status': campaign.get('status')
+                })
+            
+            logger.info(f"Fetched {len(dataset2)} campaigns")
+            
+            # ========================================
+            # Dataset 3: Get email accounts for each campaign
+            # ========================================
+            logger.info("Fetching email accounts per campaign (Dataset 3)...")
+            dataset3 = []
+            
+            for campaign in dataset2:
+                campaign_id = campaign['campaign_id']
+                url = f"{base_url}/campaigns/{campaign_id}/email-accounts?api_key={api_key}"
+                
+                try:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    campaign_accounts = response.json()
+                    
+                    for account_mapping in campaign_accounts:
+                        dataset3.append({
+                            'email_account_id': account_mapping.get('email_account_id'),
+                            'campaign_id': campaign_id,
+                            'time_added_to_campaign': account_mapping.get('created_at')
+                        })
+                except Exception as e:
+                    logger.warning(f"Could not fetch accounts for campaign {campaign_id}: {str(e)}")
+                    continue
+            
+            logger.info(f"Fetched {len(dataset3)} campaign-account mappings")
+            
+            # ========================================
+            # Dataset 4: Left outer join Dataset 1 and Dataset 3
+            # ========================================
+            logger.info("Performing join operations...")
+            dataset4 = []
+            
+            # Create a lookup for dataset3 by email_account_id
+            dataset3_lookup = {}
+            for row in dataset3:
+                email_account_id = row['email_account_id']
+                if email_account_id not in dataset3_lookup:
+                    dataset3_lookup[email_account_id] = []
+                dataset3_lookup[email_account_id].append(row)
+            
+            # Left outer join: for each email account, get all campaign associations
+            for account in dataset1:
+                email_account_id = account['email_account_id']
+                campaign_mappings = dataset3_lookup.get(email_account_id, [None])
+                
+                # If no campaigns, still include the email account with null campaign data
+                if not campaign_mappings or campaign_mappings == [None]:
+                    dataset4.append({
+                        **account,
+                        'campaign_id': None,
+                        'time_added_to_campaign': None
+                    })
+                else:
+                    # For each campaign the email account is associated with
+                    for mapping in campaign_mappings:
+                        dataset4.append({
+                            **account,
+                            'campaign_id': mapping['campaign_id'],
+                            'time_added_to_campaign': mapping['time_added_to_campaign']
+                        })
+            
+            # ========================================
+            # Dataset 5: Left join Dataset 4 and Dataset 2
+            # ========================================
+            # Create a lookup for dataset2 by campaign_id
+            dataset2_lookup = {row['campaign_id']: row for row in dataset2}
+            
+            final_dataset = []
+            for row in dataset4:
+                campaign_id = row['campaign_id']
+                campaign_info = dataset2_lookup.get(campaign_id, {})
+                
+                final_row = {
+                    'email_account_id': row['email_account_id'],
+                    'email_address': row['email_address'],
+                    'warmup_reputation': row['warmup_reputation'],
+                    'warmup_start_date': row['warmup_start_date'],
+                    'campaign_id': campaign_id,
+                    'campaign_name': campaign_info.get('campaign_name'),
+                    'campaign_status': campaign_info.get('campaign_status'),
+                    'time_added_to_campaign': row['time_added_to_campaign']
+                }
+                final_dataset.append(final_row)
         
         # Store filtered data in database
         conn = sqlite3.connect('data.db')
@@ -83,20 +210,26 @@ async def fetch_and_filter_data():
         # Insert new data
         cursor.execute(
             'INSERT INTO filtered_data (data) VALUES (?)',
-            (json.dumps(filtered_data),)
+            (json.dumps(final_dataset),)
         )
         
         # Log successful fetch
         cursor.execute(
             'INSERT INTO fetch_log (status, message) VALUES (?, ?)',
-            ('success', f'Fetched and filtered {len(filtered_data)} rows')
+            ('success', f'Successfully fetched and joined data: {len(dataset1)} email accounts, '
+                       f'{len(dataset2)} campaigns, {len(final_dataset)} final rows')
         )
         
         conn.commit()
         conn.close()
         
-        logger.info(f"Successfully filtered {len(filtered_data)} rows")
-        return {"status": "success", "rows_filtered": len(filtered_data)}
+        logger.info(f"Successfully processed {len(final_dataset)} final rows")
+        return {
+            "status": "success",
+            "email_accounts": len(dataset1),
+            "campaigns": len(dataset2),
+            "final_rows": len(final_dataset)
+        }
         
     except Exception as e:
         logger.error(f"Error fetching data: {str(e)}")
@@ -117,24 +250,35 @@ async def fetch_and_filter_data():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    init_db()
-    logger.info("Database initialized")
+    try:
+        init_db()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        # Continue anyway - database will be created on first use
     
-    # Schedule daily job at 2 AM UTC (adjust as needed)
-    scheduler.add_job(
-        fetch_and_filter_data,
-        CronTrigger(hour=2, minute=0),  # 2:00 AM daily
-        id='daily_fetch',
-        replace_existing=True
-    )
-    scheduler.start()
-    logger.info("Scheduler started - daily job at 2:00 AM UTC")
+    try:
+        # Schedule daily job at 2 AM UTC (adjust as needed)
+        scheduler.add_job(
+            fetch_and_filter_data,
+            CronTrigger(hour=2, minute=0),  # 2:00 AM daily
+            id='daily_fetch',
+            replace_existing=True
+        )
+        scheduler.start()
+        logger.info("Scheduler started - daily job at 2:00 AM UTC")
+    except Exception as e:
+        logger.error(f"Scheduler initialization failed: {e}")
+        # Continue anyway - app will still work without scheduler
     
     yield
     
     # Shutdown
-    scheduler.shutdown()
-    logger.info("Scheduler shut down")
+    try:
+        scheduler.shutdown()
+        logger.info("Scheduler shut down")
+    except Exception as e:
+        logger.error(f"Scheduler shutdown failed: {e}")
 
 # Initialize FastAPI app
 app = FastAPI(
