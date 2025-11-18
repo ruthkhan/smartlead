@@ -73,6 +73,8 @@ async def fetch_and_filter_data():
             offset = 0
             limit = 100
             
+            # First, get list of all email accounts
+            email_account_ids = []
             while True:
                 url = f"{base_url}/email-accounts/?api_key={api_key}&offset={offset}&limit={limit}"
                 response = await client.get(url)
@@ -83,16 +85,43 @@ async def fetch_and_filter_data():
                     break
                 
                 for account in data:
-                    dataset1.append({
-                        'email_account_id': account.get('id'),
-                        'email_address': account.get('from_email'),
-                        'warmup_reputation': account.get('warmup_details', {}).get('warmup_reputation'),
-                        'warmup_start_date': account.get('warmup_details', {}).get('created_at')
+                    email_account_ids.append({
+                        'id': account.get('id'),
+                        'from_email': account.get('from_email'),
+                        'warmup_reputation': account.get('warmup_details', {}).get('warmup_reputation')
                     })
                 
                 if len(data) < limit:
                     break
                 offset += limit
+            
+            # Now fetch individual email account details to get warmup_start_date
+            logger.info(f"Fetching detailed warmup info for {len(email_account_ids)} email accounts...")
+            for account_info in email_account_ids:
+                email_id = account_info['id']
+                
+                # Fetch individual account details
+                url = f"{base_url}/email-accounts/{email_id}?api_key={api_key}"
+                try:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    account_detail = response.json()
+                    
+                    dataset1.append({
+                        'email_account_id': email_id,
+                        'email_address': account_info['from_email'],
+                        'warmup_reputation': account_info['warmup_reputation'],
+                        'warmup_start_date': account_detail.get('warmupdetails', {}).get('created_at')
+                    })
+                except Exception as e:
+                    logger.warning(f"Could not fetch details for email account {email_id}: {str(e)}")
+                    # Add with null warmup_start_date if individual fetch fails
+                    dataset1.append({
+                        'email_account_id': email_id,
+                        'email_address': account_info['from_email'],
+                        'warmup_reputation': account_info['warmup_reputation'],
+                        'warmup_start_date': None
+                    })
             
             logger.info(f"Fetched {len(dataset1)} email accounts")
             
@@ -132,7 +161,7 @@ async def fetch_and_filter_data():
                     
                     for account_mapping in campaign_accounts:
                         dataset3.append({
-                            'email_account_id': account_mapping.get('email_account_id'),
+                            'email_account_id': account_mapping.get('id'),
                             'campaign_id': campaign_id,
                             'time_added_to_campaign': account_mapping.get('created_at')
                         })
