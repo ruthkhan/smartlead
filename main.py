@@ -328,11 +328,13 @@ async def get_filtered_data():
         logger.error(f"Error retrieving data: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/refresh")
 @app.post("/refresh")
 async def manual_refresh():
     """
     Manually trigger data fetch and filter.
     Useful for testing or immediate updates.
+    Works with both GET and POST requests.
     """
     result = await fetch_and_filter_data()
     return result
