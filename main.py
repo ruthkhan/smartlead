@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 import httpx
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -42,14 +42,18 @@ def init_db():
 # Fetch and filter data function
 async def fetch_and_filter_data():
     """
-    Fetch data from SmartLead API and perform joins to create final dataset.
+    Fetch data from SmartLead API and perform joins with filtering to create final dataset.
     
     Workflow:
     1. [Dataset 1] Call /email-accounts to get all email account data
-    2. [Dataset 2] Call /campaigns to get all campaigns
-    3. [Dataset 3] For each campaign, call /campaigns/{campaign_id}/email-accounts
-    4. [Dataset 4] Left outer join Dataset 1 and Dataset 3 on email account id
-    5. [Dataset 5] Left join Dataset 4 and Dataset 2 on campaign id
+    2. [Dataset 2] Filter Dataset 1 to retain only email accounts where warmup_reputation is null or <= 98%
+    3. [Dataset 3] Call /email-accounts/{email_id} to get warmup_start_date
+    4. [Dataset 4] Left join Dataset 2 and Dataset 3 on id/email_id
+    5. [Dataset 5] Filter Dataset 4 to retain only email accounts where warmup_start_date is >= 2 weeks before current date
+    6. [Dataset 6] Call /campaigns to get all campaigns
+    7. [Dataset 7] For each campaign, call /campaigns/{campaign_id}/email-accounts
+    8. [Dataset 8] Left outer join Dataset 5 and Dataset 7 on id/email_id
+    9. [Dataset 9] Left join Dataset 8 and Dataset 6 on campaign id
     """
     logger.info("Starting SmartLead data fetch job...")
     
@@ -57,6 +61,8 @@ async def fetch_and_filter_data():
         # IMPORTANT: Set your SmartLead API key here or use environment variable
         # Get from: https://app.smartlead.ai/app/settings/profile
         import os
+        from datetime import datetime, timedelta
+        
         api_key = os.getenv('SMARTLEAD_API_KEY', 'YOUR_API_KEY_HERE')
         
         if api_key == 'YOUR_API_KEY_HERE':
@@ -73,8 +79,6 @@ async def fetch_and_filter_data():
             offset = 0
             limit = 100
             
-            # First, get list of all email accounts
-            email_account_ids = []
             while True:
                 url = f"{base_url}/email-accounts/?api_key={api_key}&offset={offset}&limit={limit}"
                 response = await client.get(url)
@@ -85,9 +89,9 @@ async def fetch_and_filter_data():
                     break
                 
                 for account in data:
-                    email_account_ids.append({
-                        'id': account.get('id'),
-                        'from_email': account.get('from_email'),
+                    dataset1.append({
+                        'email_account_id': account.get('id'),
+                        'email_address': account.get('from_email'),
                         'warmup_reputation': account.get('warmup_details', {}).get('warmup_reputation')
                     })
                 
@@ -95,62 +99,135 @@ async def fetch_and_filter_data():
                     break
                 offset += limit
             
-            # Now fetch individual email account details to get warmup_start_date
-            logger.info(f"Fetching detailed warmup info for {len(email_account_ids)} email accounts...")
-            for account_info in email_account_ids:
-                email_id = account_info['id']
+            logger.info(f"Dataset 1: Fetched {len(dataset1)} email accounts")
+            
+            # ========================================
+            # Dataset 2: Filter by warmup_reputation <= 98 or null
+            # ========================================
+            logger.info("Filtering by warmup reputation (Dataset 2)...")
+            dataset2 = []
+
+            for account in dataset1:
+                reputation = account['warmup_reputation']
                 
-                # Fetch individual account details
+                # Include if null or <= 98
+                if reputation is None:
+                    dataset2.append(account)
+                else:
+                    try:
+                        # Remove '%' symbol if present and convert to float
+                        rep_str = str(reputation).replace('%', '').strip()
+                        rep_value = float(rep_str)
+                        if rep_value <= 98:
+                            dataset2.append(account)
+                    except (ValueError, TypeError):
+                        # If can't convert, skip this account
+                        logger.warning(f"Could not parse warmup_reputation value: {reputation} for account {account['email_account_id']}")
+                        continue
+
+            logger.info(f"Dataset 2: Retained {len(dataset2)} email accounts after warmup reputation filter (filtered out {len(dataset1) - len(dataset2)})")
+            
+            # ========================================
+            # Dataset 3: Get warmup_start_date for filtered accounts
+            # ========================================
+            logger.info("Fetching warmup start dates for filtered accounts (Dataset 3)...")
+            dataset3 = []
+            
+            for account in dataset2:
+                email_id = account['email_account_id']
                 url = f"{base_url}/email-accounts/{email_id}?api_key={api_key}"
+                
                 try:
                     response = await client.get(url)
                     response.raise_for_status()
                     account_detail = response.json()
                     
-                    dataset1.append({
+                    dataset3.append({
                         'email_account_id': email_id,
-                        'email_address': account_info['from_email'],
-                        'warmup_reputation': account_info['warmup_reputation'],
                         'warmup_start_date': account_detail.get('warmupdetails', {}).get('created_at')
                     })
                 except Exception as e:
                     logger.warning(f"Could not fetch details for email account {email_id}: {str(e)}")
                     # Add with null warmup_start_date if individual fetch fails
-                    dataset1.append({
+                    dataset3.append({
                         'email_account_id': email_id,
-                        'email_address': account_info['from_email'],
-                        'warmup_reputation': account_info['warmup_reputation'],
                         'warmup_start_date': None
                     })
             
-            logger.info(f"Fetched {len(dataset1)} email accounts")
+            logger.info(f"Dataset 3: Fetched warmup dates for {len(dataset3)} accounts")
             
             # ========================================
-            # Dataset 2: Get all campaigns
+            # Dataset 4: Left join Dataset 2 and Dataset 3
             # ========================================
-            logger.info("Fetching campaigns (Dataset 2)...")
+            logger.info("Joining email account data (Dataset 4)...")
+            dataset3_lookup = {row['email_account_id']: row for row in dataset3}
+            
+            dataset4 = []
+            for account in dataset2:
+                email_id = account['email_account_id']
+                warmup_info = dataset3_lookup.get(email_id, {})
+                
+                dataset4.append({
+                    'email_account_id': email_id,
+                    'email_address': account['email_address'],
+                    'warmup_reputation': account['warmup_reputation'],
+                    'warmup_start_date': warmup_info.get('warmup_start_date')
+                })
+            
+            logger.info(f"Dataset 4: Joined {len(dataset4)} email accounts with warmup dates")
+            
+            # ========================================
+            # Dataset 5: Filter by warmup_start_date >= 2 weeks ago
+            # ========================================
+            logger.info("Filtering by warmup start date (Dataset 5)...")
+            two_weeks_ago = datetime.now(timezone.utc) - timedelta(weeks=2)
+            dataset5 = []
+            
+            for account in dataset4:
+                warmup_start = account['warmup_start_date']
+                
+                # Include if warmup_start_date is null or >= 2 weeks ago
+                if warmup_start is None:
+                    dataset5.append(account)
+                else:
+                    try:
+                        # Parse the date and compare
+                        # Handle various datetime formats
+                        start_date = datetime.fromisoformat(warmup_start.replace('Z', '+00:00'))
+                        if start_date <= two_weeks_ago:
+                            dataset5.append(account)
+                    except (ValueError, AttributeError) as e:
+                        logger.warning(f"Could not parse warmup_start_date: {warmup_start} for account {account['email_account_id']}")
+                        continue
+            
+            logger.info(f"Dataset 5: Retained {len(dataset5)} email accounts after warmup date filter (filtered out {len(dataset4) - len(dataset5)})")
+            
+            # ========================================
+            # Dataset 6: Get all campaigns
+            # ========================================
+            logger.info("Fetching campaigns (Dataset 6)...")
             url = f"{base_url}/campaigns?api_key={api_key}"
             response = await client.get(url)
             response.raise_for_status()
             campaigns = response.json()
             
-            dataset2 = []
+            dataset6 = []
             for campaign in campaigns:
-                dataset2.append({
+                dataset6.append({
                     'campaign_id': campaign.get('id'),
                     'campaign_name': campaign.get('name'),
                     'campaign_status': campaign.get('status')
                 })
             
-            logger.info(f"Fetched {len(dataset2)} campaigns")
+            logger.info(f"Dataset 6: Fetched {len(dataset6)} campaigns")
             
             # ========================================
-            # Dataset 3: Get email accounts for each campaign
+            # Dataset 7: Get email accounts for each campaign
             # ========================================
-            logger.info("Fetching email accounts per campaign (Dataset 3)...")
-            dataset3 = []
+            logger.info("Fetching email accounts per campaign (Dataset 7)...")
+            dataset7 = []
             
-            for campaign in dataset2:
+            for campaign in dataset6:
                 campaign_id = campaign['campaign_id']
                 url = f"{base_url}/campaigns/{campaign_id}/email-accounts?api_key={api_key}"
                 
@@ -160,7 +237,7 @@ async def fetch_and_filter_data():
                     campaign_accounts = response.json()
                     
                     for account_mapping in campaign_accounts:
-                        dataset3.append({
+                        dataset7.append({
                             'email_account_id': account_mapping.get('id'),
                             'campaign_id': campaign_id,
                             'time_added_to_campaign': account_mapping.get('created_at')
@@ -169,30 +246,30 @@ async def fetch_and_filter_data():
                     logger.warning(f"Could not fetch accounts for campaign {campaign_id}: {str(e)}")
                     continue
             
-            logger.info(f"Fetched {len(dataset3)} campaign-account mappings")
+            logger.info(f"Dataset 7: Fetched {len(dataset7)} campaign-account mappings")
             
             # ========================================
-            # Dataset 4: Left outer join Dataset 1 and Dataset 3
+            # Dataset 8: Left outer join Dataset 5 and Dataset 7
             # ========================================
-            logger.info("Performing join operations...")
-            dataset4 = []
+            logger.info("Performing join operations (Dataset 8)...")
             
-            # Create a lookup for dataset3 by email_account_id
-            dataset3_lookup = {}
-            for row in dataset3:
+            # Create a lookup for dataset7 by email_account_id
+            dataset7_lookup = {}
+            for row in dataset7:
                 email_account_id = row['email_account_id']
-                if email_account_id not in dataset3_lookup:
-                    dataset3_lookup[email_account_id] = []
-                dataset3_lookup[email_account_id].append(row)
+                if email_account_id not in dataset7_lookup:
+                    dataset7_lookup[email_account_id] = []
+                dataset7_lookup[email_account_id].append(row)
             
-            # Left outer join: for each email account, get all campaign associations
-            for account in dataset1:
+            # Left outer join: for each email account in dataset5, get all campaign associations
+            dataset8 = []
+            for account in dataset5:
                 email_account_id = account['email_account_id']
-                campaign_mappings = dataset3_lookup.get(email_account_id, [None])
+                campaign_mappings = dataset7_lookup.get(email_account_id, [None])
                 
                 # If no campaigns, still include the email account with null campaign data
                 if not campaign_mappings or campaign_mappings == [None]:
-                    dataset4.append({
+                    dataset8.append({
                         **account,
                         'campaign_id': None,
                         'time_added_to_campaign': None
@@ -200,22 +277,26 @@ async def fetch_and_filter_data():
                 else:
                     # For each campaign the email account is associated with
                     for mapping in campaign_mappings:
-                        dataset4.append({
+                        dataset8.append({
                             **account,
                             'campaign_id': mapping['campaign_id'],
                             'time_added_to_campaign': mapping['time_added_to_campaign']
                         })
             
+            logger.info(f"Dataset 8: Created {len(dataset8)} rows after joining with campaigns")
+            
             # ========================================
-            # Dataset 5: Left join Dataset 4 and Dataset 2
+            # Dataset 9: Left join Dataset 8 and Dataset 6
             # ========================================
-            # Create a lookup for dataset2 by campaign_id
-            dataset2_lookup = {row['campaign_id']: row for row in dataset2}
+            logger.info("Final join with campaign details (Dataset 9)...")
+            
+            # Create a lookup for dataset6 by campaign_id
+            dataset6_lookup = {row['campaign_id']: row for row in dataset6}
             
             final_dataset = []
-            for row in dataset4:
+            for row in dataset8:
                 campaign_id = row['campaign_id']
-                campaign_info = dataset2_lookup.get(campaign_id, {})
+                campaign_info = dataset6_lookup.get(campaign_id, {})
                 
                 final_row = {
                     'email_account_id': row['email_account_id'],
@@ -228,6 +309,8 @@ async def fetch_and_filter_data():
                     'time_added_to_campaign': row['time_added_to_campaign']
                 }
                 final_dataset.append(final_row)
+        
+        logger.info(f"Dataset 9: Final dataset created with {len(final_dataset)} rows")
         
         # Store filtered data in database
         conn = sqlite3.connect('data.db')
@@ -242,22 +325,30 @@ async def fetch_and_filter_data():
             (json.dumps(final_dataset),)
         )
         
-        # Log successful fetch
+        # Log successful fetch with detailed statistics
         cursor.execute(
             'INSERT INTO fetch_log (status, message) VALUES (?, ?)',
-            ('success', f'Successfully fetched and joined data: {len(dataset1)} email accounts, '
-                       f'{len(dataset2)} campaigns, {len(final_dataset)} final rows')
+            ('success', f'Successfully fetched and filtered data: '
+                       f'Initial: {len(dataset1)} email accounts, '
+                       f'After warmup filter: {len(dataset2)}, '
+                       f'After date filter: {len(dataset5)}, '
+                       f'Campaigns: {len(dataset6)}, '
+                       f'Final rows: {len(final_dataset)}')
         )
         
         conn.commit()
         conn.close()
         
-        logger.info(f"Successfully processed {len(final_dataset)} final rows")
+        logger.info(f"Successfully processed and stored {len(final_dataset)} final rows")
         return {
             "status": "success",
-            "email_accounts": len(dataset1),
-            "campaigns": len(dataset2),
-            "final_rows": len(final_dataset)
+            "initial_email_accounts": len(dataset1),
+            "after_reputation_filter": len(dataset2),
+            "after_date_filter": len(dataset5),
+            "campaigns": len(dataset6),
+            "final_rows": len(final_dataset),
+            "filtered_out_by_reputation": len(dataset1) - len(dataset2),
+            "filtered_out_by_date": len(dataset4) - len(dataset5)
         }
         
     except Exception as e:
