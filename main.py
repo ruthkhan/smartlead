@@ -144,7 +144,7 @@ async def fetch_and_filter_data():
                     
                     dataset3.append({
                         'email_account_id': email_id,
-                        'warmup_start_date': account_detail.get('warmupdetails', {}).get('created_at')
+                        'warmup_start_date': account_detail.get('warmup_details', {}).get('created_at')
                     })
                 except Exception as e:
                     logger.warning(f"Could not fetch details for email account {email_id}: {str(e)}")
