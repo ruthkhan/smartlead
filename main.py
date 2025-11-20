@@ -89,10 +89,13 @@ async def fetch_and_filter_data():
                     break
                 
                 for account in data:
+                    # Fix: Handle None warmup_details
+                    warmup_details = account.get('warmup_details') or {}
+                    
                     dataset1.append({
                         'email_account_id': account.get('id'),
                         'email_address': account.get('from_email'),
-                        'warmup_reputation': account.get('warmup_details', {}).get('warmup_reputation')
+                        'warmup_reputation': warmup_details.get('warmup_reputation')
                     })
                 
                 if len(data) < limit:
@@ -141,10 +144,10 @@ async def fetch_and_filter_data():
                     response = await client.get(url)
                     response.raise_for_status()
                     account_detail = response.json()
-                    
+                    warmup_info = account_detail.get('warmupdetails') or {}
                     dataset3.append({
                         'email_account_id': email_id,
-                        'warmup_start_date': account_detail.get('warmup_details', {}).get('created_at')
+                        'warmup_start_date': warmup_info.get('created_at')
                     })
                 except Exception as e:
                     logger.warning(f"Could not fetch details for email account {email_id}: {str(e)}")
