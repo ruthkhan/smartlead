@@ -92,6 +92,10 @@ async def fetch_and_filter_data():
                     # Fix: Handle None warmup_details
                     warmup_details = account.get('warmup_details') or {}
                     
+                    # Skip accounts where warmup_details is None
+                    if warmup_details is None:
+                        continue
+
                     dataset1.append({
                         'email_account_id': account.get('id'),
                         'email_address': account.get('from_email'),
