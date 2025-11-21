@@ -148,7 +148,8 @@ async def fetch_and_filter_data():
                     response = await client.get(url)
                     response.raise_for_status()
                     account_detail = response.json()
-                    warmup_info = account_detail.get('warmupdetails') or {}
+
+                    warmup_info = account_detail.get('warmupdetails', {})
                     dataset3.append({
                         'email_account_id': email_id,
                         'warmup_start_date': warmup_info.get('created_at')
