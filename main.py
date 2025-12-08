@@ -117,9 +117,9 @@ async def fetch_and_filter_data():
             for account in dataset1:
                 reputation = account['warmup_reputation']
                 
-                # Include if null or <= 98
+                # Include if <= 98
                 if reputation is None:
-                    dataset2.append(account)
+                    continue
                 else:
                     try:
                         # Remove '%' symbol if present and convert to float
@@ -194,9 +194,9 @@ async def fetch_and_filter_data():
             for account in dataset4:
                 warmup_start = account['warmup_start_date']
                 
-                # Include if warmup_start_date is null or >= 2 weeks ago
+                # Include if warmup_start_date is >= 2 weeks ago
                 if warmup_start is None:
-                    dataset5.append(account)
+                    continue
                 else:
                     try:
                         # Parse the date and compare
@@ -510,4 +510,5 @@ async def schedule_info():
             }
             for job in jobs
         ]
+
     }
