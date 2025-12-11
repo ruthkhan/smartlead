@@ -257,6 +257,11 @@ async def fetch_and_process_data():
                         'warmup_start_date': None
                     })
             
+            warmup_date_lookup = {
+                acc['email_account_id']: acc.get('warmup_start_date')
+                for acc in accounts_with_dates
+            }
+
             # Filter by warmup_start_date >= 2 weeks ago
             two_weeks_ago = datetime.now(timezone.utc) - timedelta(weeks=2)
             date_filtered_accounts = []
@@ -335,13 +340,34 @@ async def fetch_and_process_data():
                 'warmup_start_date': None
             })
             
+            accounts_needing_warmup = set()
+            for account in all_email_accounts:
+                if account['email_account_id'] not in warmup_date_lookup:
+                    accounts_needing_warmup.add(account['email_account_id'])
+
+            # Fetch warmup dates for remaining accounts (rate limited)
+            logger.info(f"Fetching warmup dates for {len(accounts_needing_warmup)} additional accounts...")
+            for i, email_id in enumerate(accounts_needing_warmup):
+                url = f"{base_url}/email-accounts/{email_id}?api_key={api_key}"
+                
+                try:
+                    account_detail = await rate_limited_request(client, url, request_count)
+                    warmup_info = account_detail.get('warmup_details') or {}
+                    warmup_date_lookup[email_id] = warmup_info.get('created_at')
+                    
+                    if (i + 1) % 50 == 0:
+                        logger.info(f"Fetched additional warmup dates for {i + 1}/{len(accounts_needing_warmup)} accounts...")
+                except Exception as e:
+                    logger.warning(f"Could not fetch details for email account {email_id}: {str(e)}")
+                    warmup_date_lookup[email_id] = None
+
             # Map all email accounts to their campaigns
             for account in all_email_accounts:
                 email_id = account['email_account_id']
                 domain = account['domain']
                 type_value = account['type']
                 messages_per_day = account['message_per_day'] or 0
-                warmup_start_date = account.get('warmup_details', {}).get('created_at')
+                warmup_start_date = warmup_date_lookup.get(email_id)
 
                 campaigns = campaign_lookup.get(email_id, [])
                 
