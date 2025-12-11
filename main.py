@@ -382,7 +382,7 @@ async def fetch_and_process_data():
                 
                 # Determine domain_status
                 campaign_status = data['campaign_status']
-                if campaign_status in ['Active', 'Drafted', 'Paused']:
+                if campaign_status in ['ACTIVE', 'DRAFTED', 'PAUSED']:
                     domain_status = campaign_status
                 else:
                     # Check warmup_start_date
