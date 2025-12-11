@@ -331,7 +331,8 @@ async def fetch_and_process_data():
                 'email_accounts': set(),
                 'total_messages_per_day': 0,
                 'type': None,
-                'campaign_status': None
+                'campaign_status': None, 
+                'warmup_start_date': None
             })
             
             # Map all email accounts to their campaigns
@@ -340,7 +341,8 @@ async def fetch_and_process_data():
                 domain = account['domain']
                 type_value = account['type']
                 messages_per_day = account['message_per_day'] or 0
-                
+                warmup_start_date = account.get('warmup_details', {}).get('created_at')
+
                 campaigns = campaign_lookup.get(email_id, [])
                 
                 # If account has campaigns, add to each campaign row
@@ -358,6 +360,9 @@ async def fetch_and_process_data():
                             domain_campaign_data[key]['campaign_status'] = campaign_status
                             if not domain_campaign_data[key]['type']:
                                 domain_campaign_data[key]['type'] = type_value
+                            if not domain_campaign_data[key]['warmup_start_date']:  
+                                domain_campaign_data[key]['warmup_start_date'] = warmup_start_date
+
                 else:
                     # Account not in any campaign - create row with null campaign
                     if domain:
@@ -366,17 +371,40 @@ async def fetch_and_process_data():
                         domain_campaign_data[key]['total_messages_per_day'] += messages_per_day
                         if not domain_campaign_data[key]['type']:
                             domain_campaign_data[key]['type'] = type_value
+                        if not domain_campaign_data[key]['warmup_start_date']: 
+                            domain_campaign_data[key]['warmup_start_date'] = warmup_start_date
             
             # Build final Table 2
+            two_weeks_ago = datetime.now(timezone.utc) - timedelta(weeks=2)
             table2_data = []
             for (domain, campaign_name), data in domain_campaign_data.items():
                 vendor_name = domain_vendor_map.get(domain, 'Unknown')
                 
+                # Determine domain_status
+                campaign_status = data['campaign_status']
+                if campaign_status in ['Active', 'Drafted', 'Paused']:
+                    domain_status = campaign_status
+                else:
+                    # Check warmup_start_date
+                    warmup_start = data['warmup_start_date']
+                    if warmup_start:
+                        try:
+                            start_date = datetime.fromisoformat(warmup_start.replace('Z', '+00:00'))
+                            if start_date <= two_weeks_ago:
+                                domain_status = 'Standby'
+                            else:
+                                domain_status = 'Warming'
+                        except (ValueError, AttributeError):
+                            domain_status = 'Warming'
+                    else:
+                        domain_status = 'Warming'
+
                 table2_data.append({
                     'domain': domain,
                     'vendor_name': vendor_name,
                     'campaign_name': campaign_name,
                     'campaign_status': data['campaign_status'],
+                    'domain_status': domain_status,
                     'type': data['type'],
                     'number_of_email_accounts': len(data['email_accounts']),
                     'total_messages_per_day': data['total_messages_per_day'],
