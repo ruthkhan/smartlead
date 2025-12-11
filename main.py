@@ -379,7 +379,8 @@ async def fetch_and_process_data():
                     'campaign_status': data['campaign_status'],
                     'type': data['type'],
                     'number_of_email_accounts': len(data['email_accounts']),
-                    'total_messages_per_day': data['total_messages_per_day']
+                    'total_messages_per_day': data['total_messages_per_day'],
+                    'monthly_capacity': data['total_messages_per_day'] * 21
                 })
             
             logger.info(f"Table 2 complete: {len(table2_data)} rows")
