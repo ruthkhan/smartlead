@@ -113,7 +113,7 @@ async def fetch_and_process_data():
             vendors = vendors_response.get('data', []) if isinstance(vendors_response, dict) else vendors_response
 
             # Create vendor lookup: domain -> vendor_id -> vendor_name
-            vendor_lookup = {v.get('id'): v.get('name') for v in vendors if isinstance(vendors, list)}
+            vendor_lookup = {v.get('id'): v.get('vendor_name') for v in vendors if isinstance(vendors, list)}
             domain_vendor_map = {}
             
             if isinstance(domain_list, list):
