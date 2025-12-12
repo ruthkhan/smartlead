@@ -115,7 +115,7 @@ async def fetch_and_process_data():
             
             if isinstance(domain_list, list):
                 for domain_entry in domain_list:
-                    domain = domain_entry.get('domain')
+                    domain = domain_entry.get('domain_name')
                     vendor_id = domain_entry.get('vendor_id')
                     if domain and vendor_id:
                         domain_vendor_map[domain] = vendor_lookup.get(vendor_id, 'Unknown')
