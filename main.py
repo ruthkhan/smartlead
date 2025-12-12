@@ -429,6 +429,17 @@ async def fetch_and_process_data():
             for (domain, campaign_name), data in domain_campaign_data.items():
                 vendor_name = domain_vendor_map.get(domain, 'Unknown')
                 
+                # Extract client from campaign_name
+                if campaign_name:
+                    if '_' in campaign_name:
+                        client = campaign_name.split('_')[0]
+                    elif ' ' in campaign_name:
+                        client = campaign_name.split(' ')[0]
+                    else:
+                        client = campaign_name
+                else:
+                    client = None
+
                 # Determine domain_status
                 if domain_campaign_count.get(domain, 0) > 1:
                     domain_status = 'MULTIPLE'
@@ -451,6 +462,7 @@ async def fetch_and_process_data():
                 table2_data.append({
                     'domain': domain,
                     'vendor_name': vendor_name,
+                    'client': client,
                     'campaign_name': campaign_name,
                     'campaign_status': data['campaign_status'],
                     'domain_status': domain_status,
