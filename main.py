@@ -107,8 +107,11 @@ async def fetch_and_process_data():
             
             # Get vendors
             vendors_url = f"{smart_senders_url}/get-vendors?api_key={api_key}"
-            vendors = await rate_limited_request(client, vendors_url, request_count)
+            vendors_response = await rate_limited_request(client, vendors_url, request_count)
             
+            # Extract vendors from nested data field
+            vendors = vendors_response.get('data', []) if isinstance(vendors_response, dict) else vendors_response
+
             # Create vendor lookup: domain -> vendor_id -> vendor_name
             vendor_lookup = {v.get('id'): v.get('name') for v in vendors if isinstance(vendors, list)}
             domain_vendor_map = {}
