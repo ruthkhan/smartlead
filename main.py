@@ -325,50 +325,15 @@ async def fetch_and_process_data():
             # TABLE 2: Domain-focused data (no warmup filters)
             # ========================================
             logger.info("Building Table 2 (domain data)...")
-            
+
             # Create domain + campaign aggregations
             domain_campaign_data = defaultdict(lambda: {
                 'email_accounts': set(),
                 'total_messages_per_day': 0,
                 'type': None,
-                'campaign_status': None, 
+                'campaign_status': None,
                 'warmup_start_date': None
             })
-
-            # Domain-level warmup lookup 
-            domain_warmup_lookup = {}
-            for acc in accounts_with_dates:
-                domain = acc.get('domain')
-                if domain and domain not in domain_warmup_lookup:
-                    domain_warmup_lookup[domain] = acc.get('warmup_start_date')
-
-            # Identify domains we still need warmup dates for
-            domains_needing_warmup = set()
-            domain_representative = {}  # Pick one email account per domain
-
-            for account in all_email_accounts:
-                domain = account['domain']
-                if domain and domain not in domain_warmup_lookup:
-                    domains_needing_warmup.add(domain)
-                    if domain not in domain_representative:
-                        domain_representative[domain] = account['email_account_id']
-
-            # Fetch warmup dates for one account per remaining domain (rate limited)
-            logger.info(f"Fetching warmup dates for {len(domains_needing_warmup)} additional domains...")
-            for i, domain in enumerate(domains_needing_warmup):
-                email_id = domain_representative[domain]
-                url = f"{base_url}/email-accounts/{email_id}?api_key={api_key}"
-                
-                try:
-                    account_detail = await rate_limited_request(client, url, request_count)
-                    warmup_info = account_detail.get('warmup_details') or {}
-                    domain_warmup_lookup[domain] = warmup_info.get('created_at')
-                    
-                    if (i + 1) % 50 == 0:
-                        logger.info(f"Fetched warmup dates for {i + 1}/{len(domains_needing_warmup)} domains...")
-                except Exception as e:
-                    logger.warning(f"Could not fetch details for domain {domain}: {str(e)}")
-                    domain_warmup_lookup[domain] = None
 
             # Map all email accounts to their campaigns
             for account in all_email_accounts:
@@ -376,8 +341,7 @@ async def fetch_and_process_data():
                 domain = account['domain']
                 type_value = account['type']
                 messages_per_day = account['message_per_day'] or 0
-                warmup_start_date = domain_warmup_lookup.get(domain)
-
+                
                 campaigns = campaign_lookup.get(email_id, [])
                 
                 # If account has campaigns, add to each campaign row
@@ -395,9 +359,6 @@ async def fetch_and_process_data():
                             domain_campaign_data[key]['campaign_status'] = campaign_status
                             if not domain_campaign_data[key]['type']:
                                 domain_campaign_data[key]['type'] = type_value
-                            if not domain_campaign_data[key]['warmup_start_date']:  
-                                domain_campaign_data[key]['warmup_start_date'] = warmup_start_date
-
                 else:
                     # Account not in any campaign - create row with null campaign
                     if domain:
@@ -406,34 +367,84 @@ async def fetch_and_process_data():
                         domain_campaign_data[key]['total_messages_per_day'] += messages_per_day
                         if not domain_campaign_data[key]['type']:
                             domain_campaign_data[key]['type'] = type_value
-                        if not domain_campaign_data[key]['warmup_start_date']: 
-                            domain_campaign_data[key]['warmup_start_date'] = warmup_start_date
-            
-            # Build final Table 2
+
+            # Count campaigns per domain
+            domain_campaign_count = defaultdict(int)
+            for (domain, campaign_name) in domain_campaign_data.keys():
+                if domain:
+                    domain_campaign_count[domain] += 1
+
+            # Identify which domains actually need warmup date checks
+            # Only needed for single-campaign domains where campaign_status != 'ACTIVE'
+            domains_needing_warmup_check = set()
+            for (domain, campaign_name), data in domain_campaign_data.items():
+                if domain and domain_campaign_count.get(domain, 0) == 1:
+                    if data['campaign_status'] != 'ACTIVE':
+                        domains_needing_warmup_check.add(domain)
+
+            # Start with warmup dates from Table 1 (already fetched)
+            domain_warmup_lookup = {}
+            for acc in accounts_with_dates:
+                domain = acc.get('domain')
+                if domain and domain not in domain_warmup_lookup:
+                    domain_warmup_lookup[domain] = acc.get('warmup_start_date')
+
+            # Only fetch warmup dates for domains that need the check AND we don't already have
+            domains_to_fetch = domains_needing_warmup_check - set(domain_warmup_lookup.keys())
+            domain_representative = {}
+
+            for account in all_email_accounts:
+                domain = account['domain']
+                if domain in domains_to_fetch and domain not in domain_representative:
+                    domain_representative[domain] = account['email_account_id']
+
+            # Fetch warmup dates for remaining domains (rate limited)
+            logger.info(f"Fetching warmup dates for {len(domains_to_fetch)} domains that need warmup checks...")
+            for i, domain in enumerate(domains_to_fetch):
+                email_id = domain_representative[domain]
+                url = f"{base_url}/email-accounts/{email_id}?api_key={api_key}"
+                
+                try:
+                    account_detail = await rate_limited_request(client, url, request_count)
+                    warmup_info = account_detail.get('warmup_details') or {}
+                    domain_warmup_lookup[domain] = warmup_info.get('created_at')
+                    
+                    if (i + 1) % 50 == 0:
+                        logger.info(f"Fetched warmup dates for {i + 1}/{len(domains_to_fetch)} domains...")
+                except Exception as e:
+                    logger.warning(f"Could not fetch details for domain {domain}: {str(e)}")
+                    domain_warmup_lookup[domain] = None
+
+            # Add warmup_start_date to domain_campaign_data
+            for (domain, campaign_name), data in domain_campaign_data.items():
+                if domain and domain in domain_warmup_lookup:
+                    data['warmup_start_date'] = domain_warmup_lookup[domain]
+
+            # Build final Table 2 with domain_status logic
             two_weeks_ago = datetime.now(timezone.utc) - timedelta(weeks=2)
             table2_data = []
             for (domain, campaign_name), data in domain_campaign_data.items():
                 vendor_name = domain_vendor_map.get(domain, 'Unknown')
                 
                 # Determine domain_status
-                campaign_status = data['campaign_status']
-                if campaign_status in ['ACTIVE', 'DRAFTED', 'PAUSED']:
-                    domain_status = campaign_status
+                if domain_campaign_count.get(domain, 0) > 1:
+                    domain_status = 'MULTIPLE'
+                elif data['campaign_status'] == 'ACTIVE':
+                    domain_status = 'ACTIVE'
                 else:
-                    # Check warmup_start_date
                     warmup_start = data['warmup_start_date']
-                    if warmup_start:
+                    if not warmup_start:
+                        domain_status = 'WARMING'
+                    else:
                         try:
                             start_date = datetime.fromisoformat(warmup_start.replace('Z', '+00:00'))
-                            if start_date <= two_weeks_ago:
-                                domain_status = 'Standby'
+                            if start_date > two_weeks_ago:
+                                domain_status = 'WARMING'
                             else:
-                                domain_status = 'Warming'
+                                domain_status = 'STANDBY'
                         except (ValueError, AttributeError):
-                            domain_status = 'Warming'
-                    else:
-                        domain_status = 'Warming'
-
+                            domain_status = 'WARMING'
+                
                 table2_data.append({
                     'domain': domain,
                     'vendor_name': vendor_name,
@@ -445,7 +456,10 @@ async def fetch_and_process_data():
                     'total_messages_per_day': data['total_messages_per_day'],
                     'monthly_capacity': data['total_messages_per_day'] * 21
                 })
-            
+
+            # Sort by domain in ascending order
+            table2_data.sort(key=lambda x: x['domain'] if x['domain'] else '')
+
             logger.info(f"Table 2 complete: {len(table2_data)} rows")
             
             # ========================================
